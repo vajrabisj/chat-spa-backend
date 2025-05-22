@@ -1,0 +1,12 @@
+{:paths ["src"]
+ :deps {org.clojure/clojure {:mvn/version "1.11.1"}
+        aleph/aleph {:mvn/version "0.8.2"}
+        manifold/manifold {:mvn/version "0.4.3"}
+        net.clojars.wkok/openai-clojure {:mvn/version "0.22.0"}
+        clj-http/clj-http {:mvn/version "3.13.0"}
+        org.clojure/data.json {:mvn/version "2.5.0"}}
+ :aliases {:run-chat {:main-opts ["-m" "chat-room.core"]}
+           :run-grok {:main-opts ["-m" "grok-server.core"]}
+           :run-openai {:main-opts ["-m" "openai-server.core"]}
+           :dev {:extra-deps {org.clojure/tools.namespace {:mvn/version "1.5.0"}}
+                 :extra-paths ["dev"]}}}
