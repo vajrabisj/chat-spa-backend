@@ -22,44 +22,57 @@
                             {:parts [{:text (:content system-message)}]}))))
 
 
+;; 调用 Gemini API
 (defn call-gemini [api-key model-name messages]
   (let [api-url (str "https://generativelanguage.googleapis.com/v1beta/models/" model-name ":generateContent")
         headers {"Content-Type" "application/json"}
         body (messages-to-gemini-contents messages)
         query-params {:key api-key}]
-    ;; ----------- 非常重要的诊断步骤开始 -----------                                                                                                   
-      (println "========== MESSAGES BEING SENT TO GEMINI START ==========")
-      (clojure.pprint/pprint body) ; 使用 pprint 格式化打印，方便阅读                                                                                   
-      (println "========== MESSAGES BEING SENT TO GEMINI END ==========")
-      ;; ----------- 非常重要的诊断步骤结束 -----------                                                                                                 
+    ;;(println "========== MESSAGES BEING SENT TO GEMINI START ==========")
+    ;;(clojure.pprint/pprint body)
+    ;;(println "========== MESSAGES BEING SENT TO GEMINI END ==========")
     (try
       (let [response (client/post api-url {:headers headers
                                           :query-params query-params
                                           :body (jsn/generate-string body)
                                           :throw-exceptions false
-                                          :as :json})]
-	(clojure.pprint/pprint response)
+                                          :as :json-string-keys})]
+        ;;(println "========== GEMINI API RESPONSE START ==========")
+        ;;(clojure.pprint/pprint response)
+        ;;(println "========== GEMINI API RESPONSE END ==========")
         (if (= 200 (:status response))
-          (:body response)
-          {:error true
-           :status (:status response)
-           :body (:body response)}))
+          (:body response) ; Return raw body
+          (do
+            (println (str "Error: API request failed with status " (:status response)))
+            {:error true
+             :status (:status response)
+             :body (:body response)})))
       (catch Exception e
+        (println (str "Gemini API request exception: " (.getMessage e)))
         {:error true
-         :message (str "请求异常: " (.getMessage e))}))))
+         :message (str "Request exception: " (.getMessage e))}))))
 
-
+;; 调用 Gemini API 包装
 (defn call-gemini-api [msg]
   (println (str "Calling Gemini API with message: " msg))
   (d/future
     (try
       (let [messages [{:role "user" :content msg}]
-      	    api-key (System/getenv "GEMINI_API_KEY")
+            api-key (System/getenv "GEMINI_API_KEY")
             model-name "gemini-2.0-flash"
             response (call-gemini api-key model-name messages)]
-        (let [content (get-in response [:candidates 0 :content :parts 0 :text])]
-          (println (str "Gemini API response: " content))
-          content))
+        ;;(println "response from call-gemini-api is:")
+        ;;(clojure.pprint/pprint response)
+        (if (:error response)
+          (do
+            (println (str "Error: API call failed with status " (:status response)))
+            (str "Error: " (:message response)))
+          (let [content (or (get-in response ["candidates" 0 "content" "parts" 0 "text"])
+                            (do
+                              (println "Error: Invalid response structure, falling back to raw response")
+                              (str "Response: " (pr-str response))))]
+            ;;(println (str "Gemini API response: " content))
+            content)))
       (catch Exception e
         (println (str "Gemini API exception: " (.getMessage e)))
         (str "Error: " (.getMessage e))))))
@@ -78,49 +91,51 @@
       (println (str "Sending join message: " join-msg))
       (s/put! ws-conn join-msg))
     ;; 处理消息
-    (s/consume
-      (fn [msg]
-        (try
-          (let [parsed (json/read-str msg :key-fn keyword)]
-            (println (str "Received message: " msg))
-            (when (and (not= (:user-id parsed) gemini-user-id)
-                       (or (str/includes? (:message parsed) "@Gemini")
-                           (str/includes? (:message parsed) "@all")))
-              (let [think-msg (json/write-str
+(s/consume
+  (fn [msg]
+    (try
+      (if (and (string? msg) (not-empty msg))
+        (let [parsed (json/read-str msg :key-fn keyword)]
+          (println (str "Received message: " msg))
+          (when (and (not= (:user-id parsed) gemini-user-id)
+                     (or (str/includes? (:message parsed) "@Gemini")
+                         (str/includes? (:message parsed) "@all")))
+            (let [think-msg (json/write-str
+                              {:user-id "System"
+                               :message "Gemini is thinking..."
+                               :type "system"
+                               :timestamp (str (java.time.Instant/now))
+                               :room-id "default"})]
+              (println (str "Sending thinking message: " think-msg))
+              (when-not (s/closed? ws-conn)
+                (s/put! ws-conn think-msg)))
+            (-> (call-gemini-api (str/replace (:message parsed) #"@Gemini|@all" ""))
+                (d/chain
+                  (fn [response]
+                    (let [response-msg (json/write-str
+                                         {:user-id gemini-user-id
+                                          :message response
+                                          :type "llm"
+                                          :timestamp (str (java.time.Instant/now))
+                                          :room-id "default"})]
+                      (println (str "Sending Gemini response: " response-msg))
+                      (when-not (s/closed? ws-conn)
+                        (s/put! ws-conn response-msg)))))
+                (d/catch
+                  (fn [error]
+                    (println (str "Error in API response handling: " error))
+                    (when-not (s/closed? ws-conn)
+                      (s/put! ws-conn
+                              (json/write-str
                                 {:user-id "System"
-                                 :message "Gemini is thinking..."
+                                 :message (str "Gemini failed to respond: " error)
                                  :type "system"
                                  :timestamp (str (java.time.Instant/now))
-                                 :room-id "default"})]
-                (println (str "Sending thinking message: " think-msg))
-                (when-not (s/closed? ws-conn)
-                  (s/put! ws-conn think-msg)))
-              (-> (call-gemini-api (str/replace (:message parsed) #"@Gemini|@all" ""))
-                  (d/chain
-                    (fn [response]
-                      (let [response-msg (json/write-str
-                                           {:user-id gemini-user-id
-                                            :message response
-                                            :type "llm"
-                                            :timestamp (str (java.time.Instant/now))
-                                            :room-id "default"})]
-                        (println (str "Sending Gemini response: " response-msg))
-                        (when-not (s/closed? ws-conn)
-                          (s/put! ws-conn response-msg)))))
-                  (d/catch
-                    (fn [error]
-                      (println (str "Error in API response handling: " error))
-                      (when-not (s/closed? ws-conn)
-                        (s/put! ws-conn
-                                (json/write-str
-                                  {:user-id "System"
-                                   :message (str "Gemini failed to respond: " error)
-                                   :type "system"
-                                   :timestamp (str (java.time.Instant/now))
-                                   :room-id "default"}))))))))
-          (catch Exception e
-            (println (str "Error processing message: " (.getMessage e))))))
-      ws-conn)
+                                 :room-id "default"}))))))))
+        (println (str "Invalid message received: " (pr-str msg))))
+      (catch Exception e
+        (println (str "Error processing message: " (.getMessage e))))))
+  ws-conn)
     ;; 清理连接
     (s/on-closed ws-conn
       (fn []
